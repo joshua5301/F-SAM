@@ -23,6 +23,7 @@ from PIL import Image, ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from utils import *
+from pgsam import build_pgsam
 
 # Parse arguments
 parser = argparse.ArgumentParser(description='Regular SGD training')
@@ -86,6 +87,22 @@ parser.add_argument('--lmbda',  default=0.95, type=float,
 
 parser.add_argument('--noise_ratio',  default=0.5, type=float,
                     metavar='N', help='noise ratio for dataset')
+
+# ---------------- PG-SAM ---------------- #
+parser.add_argument('--gates', default='', type=str,
+                    help="gate granularities: channel,branch,block,stage,logit ('' = none)")
+parser.add_argument('--gate-rho', default='0', type=str,
+                    help='per-coordinate RMS gate perturbation; float or "channel:0.05,branch:0.1"')
+parser.add_argument('--gate-norm', default='global', type=str,
+                    choices=['global', 'group', 'none'],
+                    help='global: one shared normaliser, gradients decide the split; '
+                         'group: a separate l2 ball per granularity; '
+                         'none: unnormalised, e = gate_rho * grad (rho is not an RMS then)')
+parser.add_argument('--perturb', default='none', type=str, choices=['none', 'all', 'bn'],
+                    help='weight-space arm: none = pure PG-SAM, all = SAM, bn = SAM-ON')
+parser.add_argument('--adaptive', action='store_true',
+                    help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
+                         'whose value is already 1')
 
 
 
@@ -279,7 +296,9 @@ def main():
             nesterov=False)          
     elif args.optimizer == 'FriendlySAM_adamw':
         base_optimizer = torch.optim.AdamW
-        optimizer = FriendlySAM(model.parameters(), base_optimizer, rho=args.rho, sigma=args.sigma, lmbda=args.lmbda, adaptive=0, lr=args.lr, weight_decay=args.weight_decay)          
+        optimizer = FriendlySAM(model.parameters(), base_optimizer, rho=args.rho, sigma=args.sigma, lmbda=args.lmbda, adaptive=0, lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer == 'PGSAM':
+        optimizer = build_pgsam(model, args, torch.optim.SGD)
 
     print (optimizer)
     if args.schedule == 'step':
