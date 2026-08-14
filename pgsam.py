@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
-GRANULARITIES = ('channel', 'branch', 'block', 'stage', 'logit')
+GRANULARITIES = ('channel', 'branch', 'block', 'stage', 'logit', 'stream')
 
 
 def _residual(m):
@@ -78,6 +78,20 @@ class GateBank(nn.Module):
 
     def _logit(self, model, dev):
         self._add(model, 'logit', 1, 'logit', dev)
+
+    def _stream(self, model, dev):
+        # per-channel gate on the block output (post-addition, post-ReLU)
+        for n, m in model.named_modules():
+            res, _ = _residual(m)
+            if res is None:
+                continue
+            c = None
+            for mm in res.modules():
+                if isinstance(mm, nn.BatchNorm2d):
+                    c = mm.num_features
+                elif isinstance(mm, nn.Conv2d):
+                    c = mm.out_channels
+            self._add(m, 'sm.' + n, c, 'stream', dev)
 
     def by_gran(self):
         out = {}
@@ -163,15 +177,21 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     """
     bank = GateBank(model, args.gates) if args.gates else None
 
-    bn_ids = {id(p) for m in model.modules() if isinstance(m, _BatchNorm)
-              for p in m.parameters(recurse=False)}
+    bn_w = {id(m.weight) for m in model.modules()
+            if isinstance(m, _BatchNorm) and m.weight is not None}
+    bn_b = {id(m.bias) for m in model.modules()
+            if isinstance(m, _BatchNorm) and m.bias is not None}
+    bn_ids = bn_w | bn_b
     pick = lambda f: [p for p in model.parameters() if f(p)]
-    named = [('bn', pick(lambda p: id(p) in bn_ids)),
+    named = [('bn_scale', pick(lambda p: id(p) in bn_w)),
+             ('bn_bias', pick(lambda p: id(p) in bn_b)),
              ('weight', pick(lambda p: id(p) not in bn_ids and p.dim() >= 2)),
              ('bias', pick(lambda p: id(p) not in bn_ids and p.dim() < 2))]
 
     # which weight-space coordinates the adversary may use
-    arm = {'none': (), 'all': ('bn', 'weight', 'bias'), 'bn': ('bn',)}[args.perturb]
+    arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'weight', 'bias'),
+           'bn': ('bn_scale', 'bn_bias'),
+           'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',)}[args.perturb]
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
                    perturb=n in arm and args.rho > 0, scope='w',

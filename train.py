@@ -90,7 +90,7 @@ parser.add_argument('--noise_ratio',  default=0.5, type=float,
 
 # ---------------- PG-SAM ---------------- #
 parser.add_argument('--gates', default='', type=str,
-                    help="gate granularities: channel,branch,block,stage,logit ('' = none)")
+                    help="gate granularities: channel,branch,block,stage,logit,stream ('' = none)")
 parser.add_argument('--gate-rho', default='0', type=str,
                     help='per-coordinate RMS gate perturbation; float or "channel:0.05,branch:0.1"')
 parser.add_argument('--gate-norm', default='global', type=str,
@@ -98,8 +98,10 @@ parser.add_argument('--gate-norm', default='global', type=str,
                     help='global: one shared normaliser, gradients decide the split; '
                          'group: a separate l2 ball per granularity; '
                          'none: unnormalised, e = gate_rho * grad (rho is not an RMS then)')
-parser.add_argument('--perturb', default='none', type=str, choices=['none', 'all', 'bn'],
-                    help='weight-space arm: none = pure PG-SAM, all = SAM, bn = SAM-ON')
+parser.add_argument('--perturb', default='none', type=str,
+                    choices=['none', 'all', 'bn', 'bn_scale', 'bn_bias'],
+                    help='weight-space arm: none = pure PG-SAM, all = SAM, bn = SAM-ON, '
+                         'bn_scale/bn_bias = gamma-only / beta-only SAM-ON')
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')
