@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
-GRANULARITIES = ('channel', 'branch', 'block', 'stage', 'logit', 'stream')
+GRANULARITIES = ('channel', 'channel_pre', 'shuffle', 'branch', 'block', 'stage', 'logit', 'stream')
 
 
 def _residual(m):
@@ -29,6 +29,8 @@ class GateBank(nn.Module):
         super().__init__()
         self.gates = nn.ParameterDict()
         self.gran = {}
+        self._perm = {}          # shuffle: batch permutation, held fixed while perturbed
+        self.perturbed = False   # set by PGSAM between first_step and second_step
         dev = next(model.parameters()).device
         for g in [s.strip() for s in str(spec).split(',') if s.strip()]:
             assert g in GRANULARITIES, 'unknown granularity %r' % g
@@ -46,15 +48,35 @@ class GateBank(nn.Module):
             if not torch.is_tensor(out):
                 return None
             g = self.gates[key]
-            if g.numel() == 1:
-                return out * g
-            return out * g.view([-1 if d == 1 else 1 for d in range(out.dim())])
+            if g.numel() > 1:
+                g = g.view([-1 if d == 1 else 1 for d in range(out.dim())])
+            gran = self.gran[key]
+            if gran == 'channel_pre':      # shrink toward the channel mean (= BN bias)
+                ref = module.bias.detach().view(g.shape) if module.bias is not None else 0.0
+                return out + (g - 1) * (out - ref)
+            if gran == 'shuffle':          # shrink toward a batch-shuffled self
+                p = self._perm.get(key)
+                if not self.perturbed or p is None or p.numel() != out.shape[0]:
+                    p = torch.randperm(out.shape[0], device=out.device)
+                    self._perm[key] = p
+                return out + (g - 1) * (out - out[p]).detach()
+            return out * g
         return hook
 
     def _channel(self, model, dev):
         for n, m in model.named_modules():
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
                 self._add(m, 'ch.' + n, m.num_features, 'channel', dev)
+
+    def _channel_pre(self, model, dev):
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                self._add(m, 'chp.' + n, m.num_features, 'channel_pre', dev)
+
+    def _shuffle(self, model, dev):
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                self._add(m, 'shf.' + n, m.num_features, 'shuffle', dev)
 
     def _branch(self, model, dev):
         for n, m in model.named_modules():
@@ -124,6 +146,9 @@ class PGSAM(torch.optim.Optimizer):
                 if not group['is_gate']:
                     self.state[p]['old_p'] = p.data.clone()
                 p.add_((torch.pow(p, 2) if group['adaptive'] else 1.0) * p.grad * scale.to(p))
+        bank = getattr(self, 'bank', None)
+        if bank is not None:
+            bank.perturbed = True
         if zero_grad:
             self.zero_grad()
 
@@ -138,6 +163,9 @@ class PGSAM(torch.optim.Optimizer):
                     old = self.state[p].pop('old_p', None)
                     if old is not None:
                         p.data = old
+        bank = getattr(self, 'bank', None)
+        if bank is not None:
+            bank.perturbed = False
         self.base_optimizer.step()
         if zero_grad:
             self.zero_grad()
@@ -215,6 +243,7 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
 
     opt = PGSAM(groups, base_optimizer, lr=args.lr, momentum=args.momentum,
                 weight_decay=args.weight_decay, nesterov=False)
+    opt.bank = bank
     if verbose:
         for g in opt.param_groups:
             print('  %-14s n=%-9d perturb=%-5s rho=%-8.4g scope=%s'
