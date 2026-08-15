@@ -10,7 +10,8 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
-GRANULARITIES = ('channel', 'channel_pre', 'shuffle', 'branch', 'block', 'stage', 'logit', 'stream')
+GRANULARITIES = ('channel', 'channel_pre', 'shuffle', 'branch', 'block', 'stage', 'logit',
+                 'stream', 'stream_dev')
 
 
 def _residual(m):
@@ -60,6 +61,10 @@ class GateBank(nn.Module):
                     p = torch.randperm(out.shape[0], device=out.device)
                     self._perm[key] = p
                 return out + (g - 1) * (out - out[p]).detach()
+            if gran == 'stream_dev':       # shrink toward the batch mean, no norm layer needed
+                dims = [d for d in range(out.dim()) if d != 1]
+                mu = out.mean(dims, keepdim=True).detach()
+                return out + (g - 1) * (out - mu)
             return out * g
         return hook
 
@@ -114,6 +119,20 @@ class GateBank(nn.Module):
                 elif isinstance(mm, nn.Conv2d):
                     c = mm.out_channels
             self._add(m, 'sm.' + n, c, 'stream', dev)
+
+    def _stream_dev(self, model, dev):
+        # same position as stream, but mean-referenced: out -> mu + g*(out - mu)
+        for n, m in model.named_modules():
+            res, _ = _residual(m)
+            if res is None:
+                continue
+            c = None
+            for mm in res.modules():
+                if isinstance(mm, nn.BatchNorm2d):
+                    c = mm.num_features
+                elif isinstance(mm, nn.Conv2d):
+                    c = mm.out_channels
+            self._add(m, 'smd.' + n, c, 'stream_dev', dev)
 
     def by_gran(self):
         out = {}
