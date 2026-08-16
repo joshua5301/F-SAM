@@ -10,8 +10,15 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
-GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid', 'shuffle',
+GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid',
+                 'channel_pre_front', 'channel_pre_back', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev')
+
+
+def _bns(model):
+    """all BN modules in definition (= depth) order."""
+    return [(n, m) for n, m in model.named_modules()
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d))]
 
 
 def _mid_bns(model):
@@ -103,6 +110,18 @@ class GateBank(nn.Module):
         for n, m in model.named_modules():
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)) and id(m) in mids:
                 self._add(m, 'chpm.' + n, m.num_features, 'channel_pre_mid', dev)
+
+    def _channel_pre_front(self, model, dev):
+        # first half of the BNs in depth order (resnet18: stem + conv2_x + conv3_x)
+        bns = _bns(model)
+        for n, m in bns[:len(bns) // 2]:
+            self._add(m, 'chpf.' + n, m.num_features, 'channel_pre_front', dev)
+
+    def _channel_pre_back(self, model, dev):
+        # second half of the BNs in depth order (resnet18: conv4_x + conv5_x)
+        bns = _bns(model)
+        for n, m in bns[len(bns) // 2:]:
+            self._add(m, 'chpb.' + n, m.num_features, 'channel_pre_back', dev)
 
     def _shuffle(self, model, dev):
         for n, m in model.named_modules():
