@@ -10,8 +10,20 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
-GRANULARITIES = ('channel', 'channel_pre', 'shuffle', 'branch', 'block', 'stage', 'logit',
-                 'stream', 'stream_dev')
+GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid', 'shuffle',
+                 'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev')
+
+
+def _mid_bns(model):
+    """ids of BNs internal to a residual branch (every BN but the branch's last)."""
+    mids = set()
+    for _, m in model.named_modules():
+        res, _ = _residual(m)
+        if res is None:
+            continue
+        bns = [b for b in res.modules() if isinstance(b, (nn.BatchNorm2d, nn.BatchNorm1d))]
+        mids |= {id(b) for b in bns[:-1]}
+    return mids
 
 
 def _residual(m):
@@ -52,7 +64,7 @@ class GateBank(nn.Module):
             if g.numel() > 1:
                 g = g.view([-1 if d == 1 else 1 for d in range(out.dim())])
             gran = self.gran[key]
-            if gran == 'channel_pre':      # shrink toward the channel mean (= BN bias)
+            if gran.startswith('channel_pre'):  # shrink toward the channel mean (= BN bias)
                 ref = module.bias.detach().view(g.shape) if module.bias is not None else 0.0
                 return out + (g - 1) * (out - ref)
             if gran == 'shuffle':          # shrink toward a batch-shuffled self
@@ -77,6 +89,20 @@ class GateBank(nn.Module):
         for n, m in model.named_modules():
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
                 self._add(m, 'chp.' + n, m.num_features, 'channel_pre', dev)
+
+    def _channel_pre_write(self, model, dev):
+        # write ports only: branch-terminal BNs, projection-skip BNs, stem
+        mids = _mid_bns(model)
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)) and id(m) not in mids:
+                self._add(m, 'chpw.' + n, m.num_features, 'channel_pre_write', dev)
+
+    def _channel_pre_mid(self, model, dev):
+        # internal BNs only: inside a branch, feeding the branch's own next conv
+        mids = _mid_bns(model)
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)) and id(m) in mids:
+                self._add(m, 'chpm.' + n, m.num_features, 'channel_pre_mid', dev)
 
     def _shuffle(self, model, dev):
         for n, m in model.named_modules():
