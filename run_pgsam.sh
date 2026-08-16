@@ -6,7 +6,7 @@
 device=0
 seed=1
 datasets=CIFAR100
-model=resnet18   # resnet18 VGG16BN WideResNet28x10
+model=WideResNet28x10   # resnet18 VGG16BN WideResNet28x10
 schedule=cosine
 wd=0.001
 epoch=200
