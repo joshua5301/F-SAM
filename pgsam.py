@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
 GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid',
-                 'channel_pre_front', 'channel_pre_back', 'shuffle',
+                 'channel_pre_front', 'channel_pre_back', 'channel_shift', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev')
 
 
@@ -71,6 +71,9 @@ class GateBank(nn.Module):
             if g.numel() > 1:
                 g = g.view([-1 if d == 1 else 1 for d in range(out.dim())])
             gran = self.gran[key]
+            if gran == 'channel_shift':    # additive gate on x-hat: threshold shift in sigmas
+                w = module.weight.detach().view(g.shape) if module.weight is not None else 1.0
+                return out + (g - 1) * w
             if gran.startswith('channel_pre'):  # shrink toward the channel mean (= BN bias)
                 ref = module.bias.detach().view(g.shape) if module.bias is not None else 0.0
                 return out + (g - 1) * (out - ref)
@@ -110,6 +113,11 @@ class GateBank(nn.Module):
         for n, m in model.named_modules():
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)) and id(m) in mids:
                 self._add(m, 'chpm.' + n, m.num_features, 'channel_pre_mid', dev)
+
+    def _channel_shift(self, model, dev):
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                self._add(m, 'chs.' + n, m.num_features, 'channel_shift', dev)
 
     def _channel_pre_front(self, model, dev):
         # first half of the BNs in depth order (resnet18: stem + conv2_x + conv3_x)
