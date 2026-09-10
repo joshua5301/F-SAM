@@ -11,7 +11,8 @@ import torch.nn as nn
 from torch.nn.modules.batchnorm import _BatchNorm
 
 GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid',
-                 'channel_pre_front', 'channel_pre_back', 'channel_shift', 'shuffle',
+                 'channel_pre_front', 'channel_pre_back', 'channel_shift',
+                 'channel_mat', 'channel_mix', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev')
 
 
@@ -49,6 +50,7 @@ class GateBank(nn.Module):
         super().__init__()
         self.gates = nn.ParameterDict()
         self.gran = {}
+        self.n = {}              # size used for rho_g = gate_rho*sqrt(N_g) (channels, not entries)
         self._perm = {}          # shuffle: batch permutation, held fixed while perturbed
         self.perturbed = False   # set by PGSAM between first_step and second_step
         dev = next(model.parameters()).device
@@ -57,10 +59,11 @@ class GateBank(nn.Module):
             getattr(self, '_' + g)(model, dev)
         assert len(self.gates), 'no gate attached for %r' % spec
 
-    def _add(self, module, key, size, gran, dev):
+    def _add(self, module, key, size, gran, dev, n=None):
         key = key.replace('.', '_')
         self.gates[key] = nn.Parameter(torch.ones(size, device=dev))
         self.gran[key] = gran
+        self.n[key] = self.gates[key].numel() if n is None else n
         module.register_forward_hook(self._hook(key))
 
     def _hook(self, key):
@@ -68,9 +71,19 @@ class GateBank(nn.Module):
             if not torch.is_tensor(out):
                 return None
             g = self.gates[key]
+            gran = self.gran[key]
+            if gran in ('channel_mat', 'channel_mix'):
+                # matrix gate on the standardized deviation: y + A(y - beta), A = P - 1 (P pinned at 1)
+                A = g - 1
+                if gran == 'channel_mix':                     # off-diagonal only
+                    A = A - torch.diag(A.diagonal())
+                ref = module.bias.detach() if module.bias is not None else 0.0
+                d = out - (ref.view([-1 if i == 1 else 1 for i in range(out.dim())])
+                           if torch.is_tensor(ref) else ref)
+                mixed = torch.einsum('ab,nbhw->nahw', A, d) if out.dim() == 4 else d @ A.t()
+                return out + mixed
             if g.numel() > 1:
                 g = g.view([-1 if d == 1 else 1 for d in range(out.dim())])
-            gran = self.gran[key]
             if gran == 'channel_shift':    # additive gate on x-hat: threshold shift in sigmas
                 w = module.weight.detach().view(g.shape) if module.weight is not None else 1.0
                 return out + (g - 1) * w
@@ -118,6 +131,19 @@ class GateBank(nn.Module):
         for n, m in model.named_modules():
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
                 self._add(m, 'chs.' + n, m.num_features, 'channel_shift', dev)
+
+    def _channel_mat(self, model, dev):
+        # C x C gate per BN; rho sized by channel count so gate_rho matches channel_pre's scale
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                c = m.num_features
+                self._add(m, 'chM.' + n, (c, c), 'channel_mat', dev, n=c)
+
+    def _channel_mix(self, model, dev):
+        for n, m in model.named_modules():
+            if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                c = m.num_features
+                self._add(m, 'chX.' + n, (c, c), 'channel_mix', dev, n=c)
 
     def _channel_pre_front(self, model, dev):
         # first half of the BNs in depth order (resnet18: stem + conv2_x + conv3_x)
@@ -190,7 +216,7 @@ class GateBank(nn.Module):
     def by_gran(self):
         out = {}
         for k in self.gates:
-            out.setdefault(self.gran[k], []).append(self.gates[k])
+            out.setdefault(self.gran[k], []).append(k)
         return out
 
 
@@ -303,8 +329,9 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
         spec = str(args.gate_rho)
         eps = ({k.strip(): float(v) for k, v in (i.split(':') for i in spec.split(','))}
                if ':' in spec else float(spec))
-        for gran, ps in bank.by_gran().items():
-            n = sum(p.numel() for p in ps)
+        for gran, ks in bank.by_gran().items():
+            ps = [bank.gates[k] for k in ks]
+            n = sum(bank.n[k] for k in ks)
             rho = eps.get(gran, 0.0) if isinstance(eps, dict) else eps
             if args.gate_norm != 'none':
                 rho *= n ** 0.5           # rho_g = gate_rho*sqrt(N_g): per-coordinate RMS
