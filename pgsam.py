@@ -15,8 +15,8 @@ GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid
                  'channel_mat', 'channel_mix', 'conv_mix', 'all_mix', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev',
                  # transformer (timm VisionTransformer): channel-last tensors [B, N, C]
-                 'ln_pre', 'ln_dev', 'head', 'head_dev', 'head_temp', 'mlp', 'mlp_dev')
-_LAST = ('ln_pre', 'ln_dev', 'mlp', 'mlp_dev')          # gates on the last dim
+                 'ln', 'ln_pre', 'ln_dev', 'head', 'head_dev', 'head_temp', 'mlp', 'mlp_dev')
+_LAST = ('ln', 'ln_pre', 'ln_dev', 'mlp', 'mlp_dev')          # gates on the last dim
 
 
 def _bns(model):
@@ -279,6 +279,12 @@ class GateBank(nn.Module):
             self._add(m, 'smd.' + n, c, 'stream_dev', dev)
 
     # ---- transformer granularities (duck-typed on timm's Attention / Mlp) ----
+    def _ln(self, model, dev):
+        # zero-referenced LN gate: g*y, the direct analogue of ResNet's `channel`
+        for n, m in model.named_modules():
+            if isinstance(m, nn.LayerNorm):
+                self._add(m, 'ln.' + n, m.normalized_shape[-1], 'ln', dev)
+
     def _ln_pre(self, model, dev):
         for n, m in model.named_modules():
             if isinstance(m, nn.LayerNorm):
@@ -331,23 +337,51 @@ class PGSAM(torch.optim.Optimizer):
     def __init__(self, param_groups, base_optimizer, **kwargs):
         super(PGSAM, self).__init__(param_groups, dict(
             rho=0.0, perturb=False, scope='w', is_gate=False,
-            adaptive=False, **kwargs))
+            adaptive=False, proj='none', **kwargs))
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
 
     @torch.no_grad()
+    def _direction(self, p, group):
+        """(ascent direction, squared size in the group's metric) for one parameter."""
+        g = p.grad
+        proj = group.get('proj', 'none')
+        if proj == 'none' or p.dim() < 2:
+            v = (torch.abs(p) * g) if group['adaptive'] else g
+            d = (torch.pow(p, 2) * g) if group['adaptive'] else g
+            return d, v.pow(2).sum()
+        C = p.shape[0]
+        W = p.detach().reshape(C, -1)
+        M = g.reshape(C, -1) @ W.t()                          # G W^T, C x C
+        if proj == 'orbit':        # dW = A W with ||A||_F: the weight-space form of conv_mix
+            M = M - torch.diag(M.diagonal())
+            return (M @ W).reshape(p.shape), M.pow(2).sum()
+        # 'tangent': Euclidean size of dW restricted to the orbit tangent space {A W}
+        Winv = torch.linalg.solve(W @ W.t() + 1e-6 * torch.eye(C, device=p.device, dtype=p.dtype), W)
+        P = M @ Winv                                          # G W^T (W W^T)^-1 W
+        return P.reshape(p.shape), P.pow(2).sum()
+
+    @torch.no_grad()
     def first_step(self, zero_grad=False):
-        norms = self._scope_norms()
+        dirs, sq = {}, {}
         for group in self._active():
-            norm = norms.get(group['scope'])          # scope None -> unnormalised
-            scale = torch.tensor(group['rho']) if norm is None else group['rho'] / (norm + 1e-12)
             for p in group['params']:
                 if p.grad is None:
                     continue
+                d, n2 = self._direction(p, group)
+                dirs[p] = d
+                if group['scope'] is not None:
+                    sq[group['scope']] = sq.get(group['scope'], 0.0) + n2
+        for group in self._active():
+            norm = sq.get(group['scope'])                      # scope None -> unnormalised
+            scale = torch.tensor(group['rho']) if norm is None else group['rho'] / (norm.sqrt() + 1e-12)
+            for p in group['params']:
+                if p not in dirs:
+                    continue
                 if not group['is_gate']:
                     self.state[p]['old_p'] = p.data.clone()
-                p.add_((torch.pow(p, 2) if group['adaptive'] else 1.0) * p.grad * scale.to(p))
+                p.add_(dirs[p] * scale.to(p))
         bank = getattr(self, 'bank', None)
         if bank is not None:
             bank.perturbed = True
@@ -382,19 +416,6 @@ class PGSAM(torch.optim.Optimizer):
     def _active(self):
         return [g for g in self.param_groups if g['perturb'] and g['rho']]
 
-    @torch.no_grad()
-    def _scope_norms(self):
-        sq = {}
-        for group in self._active():
-            if group['scope'] is None:
-                continue
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                v = (torch.abs(p) * p.grad) if group['adaptive'] else p.grad
-                sq[group['scope']] = sq.get(group['scope'], 0.0) + v.pow(2).sum()
-        return {k: v.sqrt() for k, v in sq.items()}
-
     def load_state_dict(self, state_dict):
         super().load_state_dict(state_dict)
         self.base_optimizer.param_groups = self.param_groups
@@ -416,16 +437,22 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     pick = lambda f: [p for p in model.parameters() if f(p)]
     named = [('bn_scale', pick(lambda p: id(p) in bn_w)),
              ('bn_bias', pick(lambda p: id(p) in bn_b)),
-             ('weight', pick(lambda p: id(p) not in bn_ids and p.dim() >= 2)),
+             ('conv', pick(lambda p: id(p) not in bn_ids and p.dim() == 4)),
+             ('weight', pick(lambda p: id(p) not in bn_ids and p.dim() in (2, 3))),
              ('bias', pick(lambda p: id(p) not in bn_ids and p.dim() < 2))]
 
-    # which weight-space coordinates the adversary may use
-    arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'weight', 'bias'),
+    # which weight-space coordinates the adversary may use, and in which metric
+    #   conv    : SAM on conv weights only (Euclidean)
+    #   tangent : SAM on conv weights, projected onto the orbit tangent space {A W} (Euclidean)
+    #   orbit   : dW = A W with ||A||_F = rho -- conv_mix in weight space (no gates needed)
+    arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'weight', 'bias'),
            'bn': ('bn_scale', 'bn_bias'),
-           'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',)}[args.perturb]
+           'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
+           'conv': ('conv',), 'tangent': ('conv',), 'orbit': ('conv',)}[args.perturb]
+    proj = args.perturb if args.perturb in ('tangent', 'orbit') else 'none'
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
-                   perturb=n in arm and args.rho > 0, scope='w',
+                   perturb=n in arm and args.rho > 0, scope='w', proj=proj,
                    is_gate=False, adaptive=bool(args.adaptive),
                    lr=args.lr, weight_decay=args.weight_decay)
               for n, ps in named if ps]
@@ -450,7 +477,7 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     opt.bank = bank
     if verbose:
         for g in opt.param_groups:
-            print('  %-14s n=%-9d perturb=%-5s rho=%-8.4g scope=%s'
+            print('  %-14s n=%-9d perturb=%-5s rho=%-8.4g scope=%-12s proj=%s'
                   % (g['name'], sum(p.numel() for p in g['params']), g['perturb'],
-                     g['rho'], g['scope']))
+                     g['rho'], g['scope'], g['proj']))
     return opt

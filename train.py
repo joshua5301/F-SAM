@@ -93,7 +93,7 @@ parser.add_argument('--gates', default='', type=str,
                     help="gate granularities: channel,channel_pre,channel_pre_write,"
                          "channel_pre_mid,channel_pre_front,channel_pre_back,channel_shift,"
                          "channel_mat,channel_mix,conv_mix,all_mix,shuffle,branch,block,stage,logit,stream,"
-                         "stream_dev; transformer: ln_pre,ln_dev,head,head_dev,head_temp,mlp,mlp_dev "
+                         "stream_dev; transformer: ln,ln_pre,ln_dev,head,head_dev,head_temp,mlp,mlp_dev "
                          "('' = none)")
 parser.add_argument('--gate-rho', default='0', type=str,
                     help='per-coordinate RMS gate perturbation; float or "channel:0.05,branch:0.1"')
@@ -103,9 +103,11 @@ parser.add_argument('--gate-norm', default='global', type=str,
                          'group: a separate l2 ball per granularity; '
                          'none: unnormalised, e = gate_rho * grad (rho is not an RMS then)')
 parser.add_argument('--perturb', default='none', type=str,
-                    choices=['none', 'all', 'bn', 'bn_scale', 'bn_bias'],
+                    choices=['none', 'all', 'bn', 'bn_scale', 'bn_bias', 'conv', 'tangent', 'orbit'],
                     help='weight-space arm: none = pure PG-SAM, all = SAM, bn = SAM-ON '
-                         '(BN or LN affine), bn_scale/bn_bias = gamma-only / beta-only SAM-ON')
+                         '(BN or LN affine), bn_scale/bn_bias = gamma-only / beta-only SAM-ON, '
+                         'conv = SAM on conv weights, tangent = SAM projected onto {A W} (Euclidean), '
+                         'orbit = dW = A W with ||A||_F = rho (conv_mix in weight space)')
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')
