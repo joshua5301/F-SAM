@@ -92,7 +92,7 @@ parser.add_argument('--noise_ratio',  default=0.5, type=float,
 parser.add_argument('--gates', default='', type=str,
                     help="gate granularities: channel,channel_pre,channel_pre_write,"
                          "channel_pre_mid,channel_pre_front,channel_pre_back,channel_shift,"
-                         "channel_mat,channel_mix,shuffle,branch,block,stage,logit,stream,"
+                         "channel_mat,channel_mix,conv_mix,all_mix,shuffle,branch,block,stage,logit,stream,"
                          "stream_dev; transformer: ln_pre,ln_dev,head,head_dev,head_temp,mlp,mlp_dev "
                          "('' = none)")
 parser.add_argument('--gate-rho', default='0', type=str,

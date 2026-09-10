@@ -12,7 +12,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid',
                  'channel_pre_front', 'channel_pre_back', 'channel_shift',
-                 'channel_mat', 'channel_mix', 'shuffle',
+                 'channel_mat', 'channel_mix', 'conv_mix', 'all_mix', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev',
                  # transformer (timm VisionTransformer): channel-last tensors [B, N, C]
                  'ln_pre', 'ln_dev', 'head', 'head_dev', 'head_temp', 'mlp', 'mlp_dev')
@@ -109,14 +109,17 @@ class GateBank(nn.Module):
                 C = C3 // 3
                 q = out[..., :C].reshape(B, N, H, C // H) * g.view(1, 1, H, 1)
                 return torch.cat([q.reshape(B, N, C), out[..., C:]], dim=-1)
-            if gran in ('channel_mat', 'channel_mix'):
-                # matrix gate on the standardized deviation: y + A(y - beta), A = P - 1 (P pinned at 1)
+            if gran in ('channel_mat', 'channel_mix', 'conv_mix', 'all_mix'):
+                # matrix gate on the centred activation: y + A(y - ref), A = P - 1 (P pinned at 1)
                 A = g - 1
-                if gran == 'channel_mix':                     # off-diagonal only
+                if gran != 'channel_mat':                     # off-diagonal only
                     A = A - torch.diag(A.diagonal())
-                ref = module.bias.detach() if module.bias is not None else 0.0
-                d = out - (ref.view([-1 if i == 1 else 1 for i in range(out.dim())])
-                           if torch.is_tensor(ref) else ref)
+                shape = [-1 if i == 1 else 1 for i in range(out.dim())]
+                if gran in ('channel_mat', 'channel_mix') and module.bias is not None:
+                    ref = module.bias.detach().view(shape)   # BN affine bias = the channel mean
+                else:                                        # no affine to read: use the batch mean
+                    ref = out.mean([i for i in range(out.dim()) if i != 1], keepdim=True).detach()
+                d = out - ref
                 mixed = torch.einsum('ab,nbhw->nahw', A, d) if out.dim() == 4 else d @ A.t()
                 return out + mixed
             if g.numel() > 1:
@@ -181,6 +184,31 @@ class GateBank(nn.Module):
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
                 c = m.num_features
                 self._add(m, 'chX.' + n, (c, c), 'channel_mix', dev, n=c)
+
+    def _conv_mix(self, model, dev):
+        # mixing gate on conv outputs, i.e. BEFORE the normalisation that follows
+        for n, m in model.named_modules():
+            if isinstance(m, nn.Conv2d):
+                self._add(m, 'cvX.' + n, (m.out_channels,) * 2, 'conv_mix', dev, n=m.out_channels)
+
+    def _all_mix(self, model, dev):
+        # every named feature map: conv outputs, norm outputs, residual block outputs
+        for n, m in model.named_modules():
+            if isinstance(m, nn.Conv2d):
+                c = m.out_channels
+            elif isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
+                c = m.num_features
+            elif _residual(m)[0] is not None:
+                c = None
+                for mm in _residual(m)[0].modules():
+                    if isinstance(mm, nn.BatchNorm2d):
+                        c = mm.num_features
+                    elif isinstance(mm, nn.Conv2d):
+                        c = mm.out_channels
+            else:
+                continue
+            if c is not None:
+                self._add(m, 'aX.' + n, (c, c), 'all_mix', dev, n=c)
 
     def _channel_pre_front(self, model, dev):
         # first half of the BNs in depth order (resnet18: stem + conv2_x + conv3_x)
