@@ -271,23 +271,30 @@ class cifar_dataloader():
 
 def get_datasets_cutout(args):
     print ('cutout!')
+    # DeiT (ImageNet-pretrained, patch 16): upsample to img_size, ImageNet stats, cutout scaled
+    vit = 'deit' in str(getattr(args, 'arch', ''))
+    resize = [transforms.Resize(args.img_size)] if vit else []
+    cutout = Cutout(16 * (args.img_size // 32)) if vit else Cutout()
     if args.datasets == 'CIFAR10':
         print ('cifar10 dataset!')
-        normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        normalize = (transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)) if vit else
+                     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)))
 
         train_loader = torch.utils.data.DataLoader(
             datasets.CIFAR10(root='./datasets/', train=True, transform=transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, 4),
+                *resize,
                 transforms.ToTensor(),
                 normalize,
-                Cutout()
+                cutout
             ]), download=True),
             batch_size=args.batch_size, shuffle=True,
             num_workers=args.workers, pin_memory=True)
 
         val_loader = torch.utils.data.DataLoader(
             datasets.CIFAR10(root='./datasets/', train=False, transform=transforms.Compose([
+                *resize,
                 transforms.ToTensor(),
                 normalize,
             ])),
@@ -301,21 +308,24 @@ def get_datasets_cutout(args):
 
     elif args.datasets == 'CIFAR100':
         print ('cifar100 dataset!')
-        normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        normalize = (transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)) if vit else
+                     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)))
 
         train_loader = torch.utils.data.DataLoader(
             datasets.CIFAR100(root='./datasets/', train=True, transform=transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, 4),
+                *resize,
                 transforms.ToTensor(),
                 normalize,
-                Cutout()
+                cutout
             ]), download=True),
             batch_size=args.batch_size, shuffle=True,
             num_workers=args.workers, pin_memory=True)
 
         val_loader = torch.utils.data.DataLoader(
             datasets.CIFAR100(root='./datasets/', train=False, transform=transforms.Compose([
+                *resize,
                 transforms.ToTensor(),
                 normalize,
             ])),

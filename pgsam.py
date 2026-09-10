@@ -13,7 +13,10 @@ from torch.nn.modules.batchnorm import _BatchNorm
 GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid',
                  'channel_pre_front', 'channel_pre_back', 'channel_shift',
                  'channel_mat', 'channel_mix', 'shuffle',
-                 'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev')
+                 'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev',
+                 # transformer (timm VisionTransformer): channel-last tensors [B, N, C]
+                 'ln_pre', 'ln_dev', 'head', 'head_temp', 'mlp', 'mlp_dev')
+_LAST = ('ln_pre', 'ln_dev', 'mlp', 'mlp_dev')          # gates on the last dim
 
 
 def _bns(model):
@@ -51,6 +54,7 @@ class GateBank(nn.Module):
         self.gates = nn.ParameterDict()
         self.gran = {}
         self.n = {}              # size used for rho_g = gate_rho*sqrt(N_g) (channels, not entries)
+        self._heads = {}         # head gates: num_heads per key
         self._perm = {}          # shuffle: batch permutation, held fixed while perturbed
         self.perturbed = False   # set by PGSAM between first_step and second_step
         dev = next(model.parameters()).device
@@ -59,12 +63,26 @@ class GateBank(nn.Module):
             getattr(self, '_' + g)(model, dev)
         assert len(self.gates), 'no gate attached for %r' % spec
 
-    def _add(self, module, key, size, gran, dev, n=None):
+    def _add(self, module, key, size, gran, dev, n=None, pre=False):
         key = key.replace('.', '_')
         self.gates[key] = nn.Parameter(torch.ones(size, device=dev))
         self.gran[key] = gran
         self.n[key] = self.gates[key].numel() if n is None else n
-        module.register_forward_hook(self._hook(key))
+        if pre:
+            module.register_forward_pre_hook(self._pre_hook(key))
+        else:
+            module.register_forward_hook(self._hook(key))
+        return key
+
+    def _pre_hook(self, key):
+        # per-head scalar gate on the input of attn.proj: [B, N, C] laid out head-major
+        def hook(module, inputs):
+            x = inputs[0]
+            B, N, C = x.shape
+            H = self._heads[key]
+            g = self.gates[key].view(1, 1, H, 1)
+            return (x.view(B, N, H, C // H) * g).view(B, N, C),
+        return hook
 
     def _hook(self, key):
         def hook(module, inputs, out):
@@ -72,6 +90,21 @@ class GateBank(nn.Module):
                 return None
             g = self.gates[key]
             gran = self.gran[key]
+            if gran in _LAST:
+                g = g.view([1] * (out.dim() - 1) + [-1])
+                if gran == 'ln_pre':       # gamma-scaling of LN's x-hat: beta + g(y - beta)
+                    ref = module.bias.detach() if module.bias is not None else 0.0
+                    return out + (g - 1) * (out - ref)
+                if gran in ('ln_dev', 'mlp_dev'):   # shrink toward the (batch x token) channel mean
+                    mu = out.mean(tuple(range(out.dim() - 1)), keepdim=True).detach()
+                    return out + (g - 1) * (out - mu)
+                return out * g             # mlp
+            if gran == 'head_temp':        # scale q per head inside qkv's output: attention temperature
+                H = self._heads[key]
+                B, N, C3 = out.shape
+                C = C3 // 3
+                q = out[..., :C].reshape(B, N, H, C // H) * g.view(1, 1, H, 1)
+                return torch.cat([q.reshape(B, N, C), out[..., C:]], dim=-1)
             if gran in ('channel_mat', 'channel_mix'):
                 # matrix gate on the standardized deviation: y + A(y - beta), A = P - 1 (P pinned at 1)
                 A = g - 1
@@ -213,6 +246,39 @@ class GateBank(nn.Module):
                     c = mm.out_channels
             self._add(m, 'smd.' + n, c, 'stream_dev', dev)
 
+    # ---- transformer granularities (duck-typed on timm's Attention / Mlp) ----
+    def _ln_pre(self, model, dev):
+        for n, m in model.named_modules():
+            if isinstance(m, nn.LayerNorm):
+                self._add(m, 'lnp.' + n, m.normalized_shape[-1], 'ln_pre', dev)
+
+    def _ln_dev(self, model, dev):
+        for n, m in model.named_modules():
+            if isinstance(m, nn.LayerNorm):
+                self._add(m, 'lnd.' + n, m.normalized_shape[-1], 'ln_dev', dev)
+
+    def _head(self, model, dev):
+        for n, m in model.named_modules():
+            if all(hasattr(m, a) for a in ('qkv', 'proj', 'num_heads')):
+                k = self._add(m.proj, 'hd.' + n, m.num_heads, 'head', dev, pre=True)
+                self._heads[k] = m.num_heads
+
+    def _head_temp(self, model, dev):
+        for n, m in model.named_modules():
+            if all(hasattr(m, a) for a in ('qkv', 'proj', 'num_heads')):
+                k = self._add(m.qkv, 'ht.' + n, m.num_heads, 'head_temp', dev)
+                self._heads[k] = m.num_heads
+
+    def _mlp(self, model, dev):
+        for n, m in model.named_modules():
+            if all(hasattr(m, a) for a in ('fc1', 'act', 'fc2')):
+                self._add(m.act, 'mlp.' + n, m.fc1.out_features, 'mlp', dev)
+
+    def _mlp_dev(self, model, dev):
+        for n, m in model.named_modules():
+            if all(hasattr(m, a) for a in ('fc1', 'act', 'fc2')):
+                self._add(m.act, 'mlpd.' + n, m.fc1.out_features, 'mlp_dev', dev)
+
     def by_gran(self):
         out = {}
         for k in self.gates:
@@ -303,10 +369,11 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     """
     bank = GateBank(model, args.gates) if args.gates else None
 
+    norm = (_BatchNorm, nn.LayerNorm)        # 'bn' arms = normalisation affine, BN or LN
     bn_w = {id(m.weight) for m in model.modules()
-            if isinstance(m, _BatchNorm) and m.weight is not None}
+            if isinstance(m, norm) and m.weight is not None}
     bn_b = {id(m.bias) for m in model.modules()
-            if isinstance(m, _BatchNorm) and m.bias is not None}
+            if isinstance(m, norm) and m.bias is not None}
     bn_ids = bn_w | bn_b
     pick = lambda f: [p for p in model.parameters() if f(p)]
     named = [('bn_scale', pick(lambda p: id(p) in bn_w)),
