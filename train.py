@@ -93,7 +93,7 @@ parser.add_argument('--gates', default='', type=str,
                     help="gate granularities: channel,channel_pre,channel_pre_write,"
                          "channel_pre_mid,channel_pre_front,channel_pre_back,channel_shift,"
                          "channel_mat,channel_mix,shuffle,branch,block,stage,logit,stream,"
-                         "stream_dev; transformer: ln_pre,ln_dev,head,head_temp,mlp,mlp_dev "
+                         "stream_dev; transformer: ln_pre,ln_dev,head,head_dev,head_temp,mlp,mlp_dev "
                          "('' = none)")
 parser.add_argument('--gate-rho', default='0', type=str,
                     help='per-coordinate RMS gate perturbation; float or "channel:0.05,branch:0.1"')

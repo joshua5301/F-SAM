@@ -15,7 +15,7 @@ GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid
                  'channel_mat', 'channel_mix', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev',
                  # transformer (timm VisionTransformer): channel-last tensors [B, N, C]
-                 'ln_pre', 'ln_dev', 'head', 'head_temp', 'mlp', 'mlp_dev')
+                 'ln_pre', 'ln_dev', 'head', 'head_dev', 'head_temp', 'mlp', 'mlp_dev')
 _LAST = ('ln_pre', 'ln_dev', 'mlp', 'mlp_dev')          # gates on the last dim
 
 
@@ -81,7 +81,11 @@ class GateBank(nn.Module):
             B, N, C = x.shape
             H = self._heads[key]
             g = self.gates[key].view(1, 1, H, 1)
-            return (x.view(B, N, H, C // H) * g).view(B, N, C),
+            xh = x.view(B, N, H, C // H)
+            if self.gran[key] == 'head_dev':   # shrink toward the head's mean output vector
+                mu = xh.mean((0, 1), keepdim=True).detach()
+                return (xh + (g - 1) * (xh - mu)).view(B, N, C),
+            return (xh * g).view(B, N, C),
         return hook
 
     def _hook(self, key):
@@ -261,6 +265,12 @@ class GateBank(nn.Module):
         for n, m in model.named_modules():
             if all(hasattr(m, a) for a in ('qkv', 'proj', 'num_heads')):
                 k = self._add(m.proj, 'hd.' + n, m.num_heads, 'head', dev, pre=True)
+                self._heads[k] = m.num_heads
+
+    def _head_dev(self, model, dev):
+        for n, m in model.named_modules():
+            if all(hasattr(m, a) for a in ('qkv', 'proj', 'num_heads')):
+                k = self._add(m.proj, 'hdd.' + n, m.num_heads, 'head_dev', dev, pre=True)
                 self._heads[k] = m.num_heads
 
     def _head_temp(self, model, dev):
