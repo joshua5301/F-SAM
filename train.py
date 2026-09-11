@@ -108,6 +108,11 @@ parser.add_argument('--perturb', default='none', type=str,
                          '(BN or LN affine), bn_scale/bn_bias = gamma-only / beta-only SAM-ON, '
                          'conv = SAM on conv weights, tangent = SAM projected onto {A W} (Euclidean), '
                          'orbit = dW = A W with ||A||_F = rho (conv_mix in weight space)')
+parser.add_argument('--envelope', action='store_true',
+                    help='orbit only: keep the (I+A)^T chain-rule term in the descent gradient '
+                         '(what the gate implementation does; the SAM/ASAM convention drops it)')
+parser.add_argument('--no-ascent', dest='no_ascent', action='store_true',
+                    help='skip the perturbation; with --envelope this leaves only the structured-decay term')
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')

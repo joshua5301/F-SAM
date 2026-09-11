@@ -337,7 +337,7 @@ class PGSAM(torch.optim.Optimizer):
     def __init__(self, param_groups, base_optimizer, **kwargs):
         super(PGSAM, self).__init__(param_groups, dict(
             rho=0.0, perturb=False, scope='w', is_gate=False,
-            adaptive=False, proj='none', **kwargs))
+            adaptive=False, proj='none', envelope=False, ascent=True, **kwargs))
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
@@ -350,27 +350,27 @@ class PGSAM(torch.optim.Optimizer):
         if proj == 'none' or p.dim() < 2:
             v = (torch.abs(p) * g) if group['adaptive'] else g
             d = (torch.pow(p, 2) * g) if group['adaptive'] else g
-            return d, v.pow(2).sum()
+            return d, v.pow(2).sum(), None
         C = p.shape[0]
         W = p.detach().reshape(C, -1)
         M = g.reshape(C, -1) @ W.t()                          # G W^T, C x C
         if proj == 'orbit':        # dW = A W with ||A||_F: the weight-space form of conv_mix
             M = M - torch.diag(M.diagonal())
-            return (M @ W).reshape(p.shape), M.pow(2).sum()
+            return (M @ W).reshape(p.shape), M.pow(2).sum(), M
         # 'tangent': Euclidean size of dW restricted to the orbit tangent space {A W}
         Winv = torch.linalg.solve(W @ W.t() + 1e-6 * torch.eye(C, device=p.device, dtype=p.dtype), W)
         P = M @ Winv                                          # G W^T (W W^T)^-1 W
-        return P.reshape(p.shape), P.pow(2).sum()
+        return P.reshape(p.shape), P.pow(2).sum(), None
 
     @torch.no_grad()
     def first_step(self, zero_grad=False):
-        dirs, sq = {}, {}
+        dirs, mats, sq = {}, {}, {}
         for group in self._active():
             for p in group['params']:
                 if p.grad is None:
                     continue
-                d, n2 = self._direction(p, group)
-                dirs[p] = d
+                d, n2, M = self._direction(p, group)
+                dirs[p], mats[p] = d, M
                 if group['scope'] is not None:
                     sq[group['scope']] = sq.get(group['scope'], 0.0) + n2
         for group in self._active():
@@ -381,7 +381,10 @@ class PGSAM(torch.optim.Optimizer):
                     continue
                 if not group['is_gate']:
                     self.state[p]['old_p'] = p.data.clone()
-                p.add_(dirs[p] * scale.to(p))
+                if mats[p] is not None and group.get('envelope', False):
+                    self.state[p]['A'] = mats[p] * scale.to(p)   # A* = rho M/||M||, kept for the descent step
+                if group.get('ascent', True):
+                    p.add_(dirs[p] * scale.to(p))
         bank = getattr(self, 'bank', None)
         if bank is not None:
             bank.perturbed = True
@@ -399,6 +402,12 @@ class PGSAM(torch.optim.Optimizer):
                     old = self.state[p].pop('old_p', None)
                     if old is not None:
                         p.data = old
+                    A = self.state[p].pop('A', None)
+                    if A is not None and p.grad is not None:
+                        # envelope term: dL/dW = (I+A)^T dL/dW' for W' = (I+A)W  (what the gate form does)
+                        C = p.shape[0]
+                        G = p.grad.reshape(C, -1)
+                        p.grad = ((torch.eye(C, device=p.device, dtype=p.dtype) + A).t() @ G).reshape(p.shape)
         bank = getattr(self, 'bank', None)
         if bank is not None:
             bank.perturbed = False
@@ -453,6 +462,8 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
                    perturb=n in arm and args.rho > 0, scope='w', proj=proj,
+                   envelope=bool(getattr(args, 'envelope', False)),
+                   ascent=not getattr(args, 'no_ascent', False),
                    is_gate=False, adaptive=bool(args.adaptive),
                    lr=args.lr, weight_decay=args.weight_decay)
               for n, ps in named if ps]
