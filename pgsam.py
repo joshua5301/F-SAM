@@ -12,7 +12,7 @@ from torch.nn.modules.batchnorm import _BatchNorm
 
 GRANULARITIES = ('channel', 'channel_pre', 'channel_pre_write', 'channel_pre_mid',
                  'channel_pre_front', 'channel_pre_back', 'channel_shift',
-                 'channel_mat', 'channel_mix', 'conv_mix', 'all_mix', 'shuffle',
+                 'channel_mat', 'channel_mix', 'conv_mix', 'conv_mat', 'conv_diag', 'all_mix', 'shuffle',
                  'branch', 'block', 'stage', 'logit', 'stream', 'stream_dev',
                  # transformer (timm VisionTransformer): channel-last tensors [B, N, C]
                  'ln', 'ln_pre', 'ln_dev', 'head', 'head_dev', 'head_temp', 'mlp', 'mlp_dev')
@@ -109,10 +109,10 @@ class GateBank(nn.Module):
                 C = C3 // 3
                 q = out[..., :C].reshape(B, N, H, C // H) * g.view(1, 1, H, 1)
                 return torch.cat([q.reshape(B, N, C), out[..., C:]], dim=-1)
-            if gran in ('channel_mat', 'channel_mix', 'conv_mix', 'all_mix'):
+            if gran in ('channel_mat', 'channel_mix', 'conv_mix', 'conv_mat', 'all_mix'):
                 # matrix gate on the centred activation: y + A(y - ref), A = P - 1 (P pinned at 1)
                 A = g - 1
-                if gran != 'channel_mat':                     # off-diagonal only
+                if gran not in ('channel_mat', 'conv_mat'):   # off-diagonal only
                     A = A - torch.diag(A.diagonal())
                 shape = [-1 if i == 1 else 1 for i in range(out.dim())]
                 if gran in ('channel_mat', 'channel_mix') and module.bias is not None:
@@ -136,7 +136,7 @@ class GateBank(nn.Module):
                     p = torch.randperm(out.shape[0], device=out.device)
                     self._perm[key] = p
                 return out + (g - 1) * (out - out[p]).detach()
-            if gran == 'stream_dev':       # shrink toward the batch mean, no norm layer needed
+            if gran in ('stream_dev', 'conv_diag'):   # shrink toward the batch mean, no norm layer needed
                 dims = [d for d in range(out.dim()) if d != 1]
                 mu = out.mean(dims, keepdim=True).detach()
                 return out + (g - 1) * (out - mu)
@@ -190,6 +190,18 @@ class GateBank(nn.Module):
         for n, m in model.named_modules():
             if isinstance(m, nn.Conv2d):
                 self._add(m, 'cvX.' + n, (m.out_channels,) * 2, 'conv_mix', dev, n=m.out_channels)
+
+    def _conv_mat(self, model, dev):
+        # full C x C gate on conv outputs; differs from conv_mix only where no norm follows the conv
+        for n, m in model.named_modules():
+            if isinstance(m, nn.Conv2d):
+                self._add(m, 'cvM.' + n, (m.out_channels,) * 2, 'conv_mat', dev, n=m.out_channels)
+
+    def _conv_diag(self, model, dev):
+        # per-channel mean-referenced gate on conv outputs: the diagonal of conv_mat on its own
+        for n, m in model.named_modules():
+            if isinstance(m, nn.Conv2d):
+                self._add(m, 'cvD.' + n, m.out_channels, 'conv_diag', dev)
 
     def _all_mix(self, model, dev):
         # every named feature map: conv outputs, norm outputs, residual block outputs
