@@ -116,6 +116,8 @@ parser.add_argument('--envelope', action='store_true',
                          'gate implementation does; the SAM/ASAM convention drops it')
 parser.add_argument('--no-ascent', dest='no_ascent', action='store_true',
                     help='skip the perturbation; with --envelope this leaves only the structured-decay term')
+parser.add_argument('--perturb-warmup', dest='perturb_warmup', default=0, type=int,
+                    help='train the first N epochs with rho=0 (plain SGD) before enabling the perturbation')
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')
@@ -335,7 +337,10 @@ def main():
 
     p0 = get_model_param_vec(model)
 
+    rhos = [g['rho'] for g in optimizer.param_groups]
     for epoch in range(args.start_epoch, args.epochs):
+        for g, r in zip(optimizer.param_groups, rhos):
+            g['rho'] = 0.0 if epoch < args.perturb_warmup else r
 
         # train for one epoch
         print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
