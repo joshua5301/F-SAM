@@ -369,6 +369,9 @@ class PGSAM(torch.optim.Optimizer):
         if proj == 'orbit':        # dW = A W with ||A||_F: the weight-space form of conv_mix
             M = M - torch.diag(M.diagonal())
             return (M @ W).reshape(p.shape), M.pow(2).sum(), M
+        if proj == 'rot':          # pure rotation: A antisymmetric, W' = Cayley(A) W  (exact SO(C))
+            K = 0.5 * (M - M.t())
+            return (K @ W).reshape(p.shape), K.pow(2).sum(), K
         # 'tangent': Euclidean size of dW restricted to the orbit tangent space {A W}
         Winv = torch.linalg.solve(W @ W.t() + 1e-6 * torch.eye(C, device=p.device, dtype=p.dtype), W)
         P = M @ Winv                                          # G W^T (W W^T)^-1 W
@@ -393,6 +396,20 @@ class PGSAM(torch.optim.Optimizer):
                     continue
                 if not group['is_gate']:
                     self.state[p]['old_p'] = p.data.clone()
+                if group.get('proj', 'none') == 'rot':
+                    A = mats[p] * scale.to(p)                        # antisymmetric, ||A||_F = rho share
+                    I = torch.eye(A.shape[0], device=p.device, dtype=p.dtype)
+                    Q = torch.linalg.solve(I - 0.5 * A, I + 0.5 * A)  # Cayley: Q in SO(C)
+                    if group.get('envelope', False):
+                        self.state[p]['Q'] = Q
+                    if group.get('ascent', True):
+                        C = p.shape[0]
+                        p.data = (Q @ p.data.reshape(C, -1)).reshape(p.shape)
+                    continue_rot = True
+                else:
+                    continue_rot = False
+                if continue_rot:
+                    continue
                 if group.get('envelope', False):
                     if mats[p] is not None:
                         self.state[p]['A'] = mats[p] * scale.to(p)   # A* = rho M/||M||, for the descent step
@@ -421,6 +438,10 @@ class PGSAM(torch.optim.Optimizer):
                     f = self.state[p].pop('f', None)
                     if f is not None and p.grad is not None:
                         p.grad = p.grad * f                     # dL/dw = (w'/w) * dL/dw'
+                    Q = self.state[p].pop('Q', None)
+                    if Q is not None and p.grad is not None:
+                        C = p.shape[0]
+                        p.grad = (Q.t() @ p.grad.reshape(C, -1)).reshape(p.shape)   # dL/dW = Q^T dL/dW'
                     A = self.state[p].pop('A', None)
                     if A is not None and p.grad is not None:
                         # envelope term: dL/dW = (I+A)^T dL/dW' for W' = (I+A)W  (what the gate form does)
@@ -476,8 +497,8 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'weight', 'bias'),
            'bn': ('bn_scale', 'bn_bias'),
            'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
-           'conv': ('conv',), 'tangent': ('conv',), 'orbit': ('conv',)}[args.perturb]
-    proj = args.perturb if args.perturb in ('tangent', 'orbit') else 'none'
+           'conv': ('conv',), 'tangent': ('conv',), 'orbit': ('conv',), 'rot': ('conv',)}[args.perturb]
+    proj = args.perturb if args.perturb in ('tangent', 'orbit', 'rot') else 'none'
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
                    perturb=n in arm and args.rho > 0, scope='w', proj=proj,
