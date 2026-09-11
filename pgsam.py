@@ -381,8 +381,12 @@ class PGSAM(torch.optim.Optimizer):
                     continue
                 if not group['is_gate']:
                     self.state[p]['old_p'] = p.data.clone()
-                if mats[p] is not None and group.get('envelope', False):
-                    self.state[p]['A'] = mats[p] * scale.to(p)   # A* = rho M/||M||, kept for the descent step
+                if group.get('envelope', False):
+                    if mats[p] is not None:
+                        self.state[p]['A'] = mats[p] * scale.to(p)   # A* = rho M/||M||, for the descent step
+                    elif group['adaptive'] and not group['is_gate']:
+                        # ASAM: w' = w(1+eps) with e_w = w^2 grad scale  ->  w'/w = 1 + w grad scale
+                        self.state[p]['f'] = 1 + p * p.grad * scale.to(p)
                 if group.get('ascent', True):
                     p.add_(dirs[p] * scale.to(p))
         bank = getattr(self, 'bank', None)
@@ -402,6 +406,9 @@ class PGSAM(torch.optim.Optimizer):
                     old = self.state[p].pop('old_p', None)
                     if old is not None:
                         p.data = old
+                    f = self.state[p].pop('f', None)
+                    if f is not None and p.grad is not None:
+                        p.grad = p.grad * f                     # dL/dw = (w'/w) * dL/dw'
                     A = self.state[p].pop('A', None)
                     if A is not None and p.grad is not None:
                         # envelope term: dL/dW = (I+A)^T dL/dW' for W' = (I+A)W  (what the gate form does)

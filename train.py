@@ -109,8 +109,9 @@ parser.add_argument('--perturb', default='none', type=str,
                          'conv = SAM on conv weights, tangent = SAM projected onto {A W} (Euclidean), '
                          'orbit = dW = A W with ||A||_F = rho (conv_mix in weight space)')
 parser.add_argument('--envelope', action='store_true',
-                    help='orbit only: keep the (I+A)^T chain-rule term in the descent gradient '
-                         '(what the gate implementation does; the SAM/ASAM convention drops it)')
+                    help='keep the chain-rule term of a multiplicative perturbation in the descent '
+                         'gradient: (I+A)^T for orbit, (w\'/w) for --adaptive (ASAM). This is what the '
+                         'gate implementation does; the SAM/ASAM convention drops it')
 parser.add_argument('--no-ascent', dest='no_ascent', action='store_true',
                     help='skip the perturbation; with --envelope this leaves only the structured-decay term')
 parser.add_argument('--adaptive', action='store_true',
