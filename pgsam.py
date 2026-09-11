@@ -486,21 +486,24 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
             if isinstance(m, norm) and m.bias is not None}
     bn_ids = bn_w | bn_b
     pick = lambda f: [p for p in model.parameters() if f(p)]
+    lins = [m for m in model.modules() if isinstance(m, nn.Linear)]
+    head_ids = {id(q) for q in lins[-1].parameters()} if lins else set()   # classifier: never rotated/mixed
     named = [('bn_scale', pick(lambda p: id(p) in bn_w)),
              ('bn_bias', pick(lambda p: id(p) in bn_b)),
              ('conv', pick(lambda p: id(p) not in bn_ids and p.dim() == 4)),
-             ('weight', pick(lambda p: id(p) not in bn_ids and p.dim() in (2, 3))),
+             ('linear', pick(lambda p: id(p) not in bn_ids and p.dim() == 2 and id(p) not in head_ids)),
+             ('weight', pick(lambda p: id(p) not in bn_ids and (p.dim() == 3 or (p.dim() == 2 and id(p) in head_ids)))),
              ('bias', pick(lambda p: id(p) not in bn_ids and p.dim() < 2))]
 
     # which weight-space coordinates the adversary may use, and in which metric
     #   conv    : SAM on conv weights only (Euclidean)
     #   tangent : SAM on conv weights, projected onto the orbit tangent space {A W} (Euclidean)
     #   orbit   : dW = A W with ||A||_F = rho -- conv_mix in weight space (no gates needed)
-    arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'weight', 'bias'),
+    mats = ('conv', 'linear')            # every matrix-shaped weight except the classifier
+    arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'linear', 'weight', 'bias'),
            'bn': ('bn_scale', 'bn_bias'),
            'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
-           'conv': ('conv',), 'tangent': ('conv',), 'orbit': ('conv',), 'rot': ('conv',),
-           'gl': ('conv',)}[args.perturb]
+           'conv': ('conv',), 'tangent': mats, 'orbit': mats, 'rot': mats, 'gl': mats}[args.perturb]
     proj = args.perturb if args.perturb in ('tangent', 'orbit', 'rot', 'gl') else 'none'
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
