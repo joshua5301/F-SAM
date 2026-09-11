@@ -366,6 +366,8 @@ class PGSAM(torch.optim.Optimizer):
         C = p.shape[0]
         W = p.detach().reshape(C, -1)
         M = g.reshape(C, -1) @ W.t()                          # G W^T, C x C
+        if proj == 'gl':           # free matrix: dW = A W, A unconstrained (= conv_mat in weight space)
+            return (M @ W).reshape(p.shape), M.pow(2).sum(), M
         if proj == 'orbit':        # dW = A W with ||A||_F: the weight-space form of conv_mix
             M = M - torch.diag(M.diagonal())
             return (M @ W).reshape(p.shape), M.pow(2).sum(), M
@@ -497,8 +499,9 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'weight', 'bias'),
            'bn': ('bn_scale', 'bn_bias'),
            'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
-           'conv': ('conv',), 'tangent': ('conv',), 'orbit': ('conv',), 'rot': ('conv',)}[args.perturb]
-    proj = args.perturb if args.perturb in ('tangent', 'orbit', 'rot') else 'none'
+           'conv': ('conv',), 'tangent': ('conv',), 'orbit': ('conv',), 'rot': ('conv',),
+           'gl': ('conv',)}[args.perturb]
+    proj = args.perturb if args.perturb in ('tangent', 'orbit', 'rot', 'gl') else 'none'
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
                    perturb=n in arm and args.rho > 0, scope='w', proj=proj,

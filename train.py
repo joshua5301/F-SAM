@@ -103,12 +103,13 @@ parser.add_argument('--gate-norm', default='global', type=str,
                          'group: a separate l2 ball per granularity; '
                          'none: unnormalised, e = gate_rho * grad (rho is not an RMS then)')
 parser.add_argument('--perturb', default='none', type=str,
-                    choices=['none', 'all', 'bn', 'bn_scale', 'bn_bias', 'conv', 'tangent', 'orbit', 'rot'],
+                    choices=['none', 'all', 'bn', 'bn_scale', 'bn_bias', 'conv', 'tangent', 'orbit', 'rot', 'gl'],
                     help='weight-space arm: none = pure PG-SAM, all = SAM, bn = SAM-ON '
                          '(BN or LN affine), bn_scale/bn_bias = gamma-only / beta-only SAM-ON, '
                          'conv = SAM on conv weights, tangent = SAM projected onto {A W} (Euclidean), '
                          'orbit = dW = A W with ||A||_F = rho (conv_mix in weight space), '
-                         'rot = pure rotation W -> Cayley(A) W with A antisymmetric (use --envelope)')
+                         'rot = pure rotation W -> Cayley(A) W with A antisymmetric (use --envelope), '
+                         'gl = free matrix W -> (I+A) W, A unconstrained (use --envelope)')
 parser.add_argument('--envelope', action='store_true',
                     help='keep the chain-rule term of a multiplicative perturbation in the descent '
                          'gradient: (I+A)^T for orbit, (w\'/w) for --adaptive (ASAM). This is what the '
