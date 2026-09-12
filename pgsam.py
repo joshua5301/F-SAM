@@ -506,14 +506,16 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     #   tangent : SAM on conv weights, projected onto the orbit tangent space {A W} (Euclidean)
     #   orbit   : dW = A W with ||A||_F = rho -- conv_mix in weight space (no gates needed)
     mats = ('conv', 'linear')            # every matrix-shaped weight except the classifier
-    arm = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'linear', 'weight', 'bias'),
-           'bn': ('bn_scale', 'bn_bias'),
-           'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
-           'conv': ('conv',), 'tangent': mats, 'orbit': mats, 'rot': mats, 'gl': mats}[args.perturb]
-    proj = args.perturb if args.perturb in ('tangent', 'orbit', 'rot', 'gl') else 'none'
+    table = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'linear', 'weight', 'bias'),
+             'bn': ('bn_scale', 'bn_bias'),
+             'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
+             'conv': ('conv',), 'tangent': mats, 'orbit': mats, 'rot': mats, 'gl': mats}
+    arms = args.perturb.split('+')       # e.g. gl+bn_scale: matrix arm on W, plain/ASAM on gamma, one shared budget
+    arm = tuple(n for a in arms for n in table[a])
+    proj = next((a for a in arms if a in ('tangent', 'orbit', 'rot', 'gl')), 'none')
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
-                   perturb=n in arm and args.rho > 0, scope='w', proj=proj,
+                   perturb=n in arm and args.rho > 0, scope='w', proj=proj if n in mats else 'none',
                    envelope=bool(getattr(args, 'envelope', False)),
                    ascent=not getattr(args, 'no_ascent', False),
                    rot_exact=bool(getattr(args, 'rot_exact', False)),

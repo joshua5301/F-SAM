@@ -109,8 +109,7 @@ parser.add_argument('--gate-norm', default='global', type=str,
                          'group: a separate l2 ball per granularity; '
                          'none: unnormalised, e = gate_rho * grad (rho is not an RMS then)')
 parser.add_argument('--perturb', default='none', type=str,
-                    choices=['none', 'all', 'bn', 'bn_scale', 'bn_bias', 'conv', 'tangent', 'orbit', 'rot', 'gl'],
-                    help='weight-space arm: none = pure PG-SAM, all = SAM, bn = SAM-ON '
+                    help='weight-space arm(s), joined with +, e.g. gl+bn_scale: none = pure PG-SAM, all = SAM, bn = SAM-ON '
                          '(BN or LN affine), bn_scale/bn_bias = gamma-only / beta-only SAM-ON, '
                          'conv = SAM on conv weights, tangent = SAM projected onto {A W} (Euclidean), '
                          'orbit = dW = A W with ||A||_F = rho (conv_mix in weight space), '
