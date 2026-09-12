@@ -529,8 +529,10 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
                                scope=None if args.gate_norm == 'none' else
                                      ('gates' if args.gate_norm == 'global' else 'gate:' + gran)))
 
-    opt = PGSAM(groups, base_optimizer, lr=args.lr, momentum=args.momentum,
-                weight_decay=args.weight_decay, nesterov=False)
+    kw = dict(lr=args.lr, weight_decay=args.weight_decay)
+    if base_optimizer is torch.optim.SGD:
+        kw.update(momentum=args.momentum, nesterov=False)
+    opt = PGSAM(groups, base_optimizer, **kw)
     opt.bank = bank
     if verbose:
         for g in opt.param_groups:

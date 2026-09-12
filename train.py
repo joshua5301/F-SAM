@@ -118,6 +118,10 @@ parser.add_argument('--no-ascent', dest='no_ascent', action='store_true',
                     help='skip the perturbation; with --envelope this leaves only the structured-decay term')
 parser.add_argument('--perturb-warmup', dest='perturb_warmup', default=0, type=int,
                     help='train the first N epochs with rho=0 (plain SGD) before enabling the perturbation')
+parser.add_argument('--base', default='sgd', type=str, choices=['sgd', 'adamw'],
+                    help='base optimizer for PGSAM')
+parser.add_argument('--warmup-epochs', dest='warmup_epochs', default=0, type=int,
+                    help='linear LR warmup epochs before the cosine schedule (cosine only)')
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')
@@ -221,17 +225,16 @@ def _cosine_annealing(step, total_steps, lr_max, lr_min):
     return lr_min + (lr_max -
                      lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
 
-def get_cosine_annealing_scheduler(optimizer, epochs, steps_per_epoch, base_lr):
+def get_cosine_annealing_scheduler(optimizer, epochs, steps_per_epoch, base_lr, warmup_steps=0):
     lr_min = 0.0
     total_steps = epochs * steps_per_epoch
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=lambda step: _cosine_annealing(
-            step,
-            total_steps,
-            1,  # since lr_lambda computes multiplicative factor
-            lr_min / base_lr))
+    def factor(step):
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        return _cosine_annealing(step - warmup_steps, total_steps - warmup_steps, 1, lr_min / base_lr)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=factor)
 
     return scheduler     
 
@@ -316,14 +319,15 @@ def main():
         base_optimizer = torch.optim.AdamW
         optimizer = FriendlySAM(model.parameters(), base_optimizer, rho=args.rho, sigma=args.sigma, lmbda=args.lmbda, adaptive=0, lr=args.lr, weight_decay=args.weight_decay)
     elif args.optimizer == 'PGSAM':
-        optimizer = build_pgsam(model, args, torch.optim.SGD)
+        optimizer = build_pgsam(model, args, torch.optim.AdamW if args.base == 'adamw' else torch.optim.SGD)
 
     print (optimizer)
     if args.schedule == 'step':
         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer.base_optimizer, milestones=[60, 120,160], gamma=0.2, last_epoch=args.start_epoch - 1)
     elif args.schedule == 'cosine':
         # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer.base_optimizer, T_max=args.epochs)
-        lr_scheduler = get_cosine_annealing_scheduler(optimizer, args.epochs, len(train_loader), args.lr)
+        lr_scheduler = get_cosine_annealing_scheduler(optimizer, args.epochs, len(train_loader), args.lr,
+                                                      warmup_steps=args.warmup_epochs * len(train_loader))
 
     if args.evaluate:
         validate(val_loader, model, criterion)
