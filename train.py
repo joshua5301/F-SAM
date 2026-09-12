@@ -115,7 +115,8 @@ parser.add_argument('--perturb', default='none', type=str,
                          'orbit = dW = A W with ||A||_F = rho (conv_mix in weight space), '
                          'rot = pure rotation W -> Cayley(A) W with A antisymmetric (use --envelope), '
                          'gl = free matrix W -> (I+A) W, A unconstrained (use --envelope), '
-                         'gl2 = two-sided W -> (I+A) W (I+B): output and input mixing, one budget (use --envelope)')
+                         'gl2 = two-sided W -> (I+A) W (I+B): output and input mixing, one budget (use --envelope), '
+                         'glr = right side only W -> W (I+B): input mixing (use --envelope)')
 parser.add_argument('--envelope', action='store_true',
                     help='keep the chain-rule term of a multiplicative perturbation in the descent '
                          'gradient: (I+A)^T for orbit, (w\'/w) for --adaptive (ASAM). This is what the '

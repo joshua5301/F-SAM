@@ -368,11 +368,13 @@ class PGSAM(torch.optim.Optimizer):
         M = g.reshape(C, -1) @ W.t()                          # G W^T, C x C
         if proj == 'gl':           # free matrix: dW = A W, A unconstrained (= conv_mat in weight space)
             return (M @ W).reshape(p.shape), M.pow(2).sum(), M
-        if proj == 'gl2':          # two-sided: dW = A W + W B; B = W^T G mixes input channels (shared over kernel offsets)
+        if proj in ('gl2', 'glr'): # right side: dW = W B, B = W^T G mixes input channels (shared over kernel offsets)
             Wr, Gr = W.reshape(C, p.shape[1], -1), g.reshape(C, p.shape[1], -1)
             N = torch.einsum('ocs,ods->cd', Wr, Gr)
-            d = (M @ W).reshape(p.shape) + torch.einsum('ocs,cd->ods', Wr, N).reshape(p.shape)
-            return d, M.pow(2).sum() + N.pow(2).sum(), (M, N)
+            d = torch.einsum('ocs,cd->ods', Wr, N).reshape(p.shape)
+            if proj == 'glr':
+                return d, N.pow(2).sum(), (None, N)
+            return d + (M @ W).reshape(p.shape), M.pow(2).sum() + N.pow(2).sum(), (M, N)   # gl2: both sides
         if proj == 'orbit':        # dW = A W with ||A||_F: the weight-space form of conv_mix
             M = M - torch.diag(M.diagonal())
             return (M @ W).reshape(p.shape), M.pow(2).sum(), M
@@ -425,7 +427,9 @@ class PGSAM(torch.optim.Optimizer):
                     continue
                 if group.get('envelope', False):
                     if isinstance(mats[p], tuple):
-                        self.state[p]['A'], self.state[p]['B'] = (m * scale.to(p) for m in mats[p])
+                        for k, m_ in zip('AB', mats[p]):
+                            if m_ is not None:
+                                self.state[p][k] = m_ * scale.to(p)
                     elif mats[p] is not None:
                         self.state[p]['A'] = mats[p] * scale.to(p)   # A* = rho M/||M||, for the descent step
                     elif group['adaptive'] and not group['is_gate']:
@@ -458,13 +462,14 @@ class PGSAM(torch.optim.Optimizer):
                         C = p.shape[0]
                         p.grad = (Q.t() @ p.grad.reshape(C, -1)).reshape(p.shape)   # dL/dW = Q^T dL/dW'
                     A, B = self.state[p].pop('A', None), self.state[p].pop('B', None)
-                    if A is not None and p.grad is not None:
-                        # envelope term: dL/dW = (I+A)^T dL/dW' for W' = (I+A)W  (what the gate form does)
+                    if (A is not None or B is not None) and p.grad is not None:
+                        # envelope term for W' = W + AW + WB:  dL/dW = (I+A)^T G' + G' B^T  (what the gate form does)
                         C = p.shape[0]
                         G = p.grad.reshape(C, -1)
-                        p.grad = ((torch.eye(C, device=p.device, dtype=p.dtype) + A).t() @ G).reshape(p.shape)
-                        if B is not None:                       # gl2, W' = W + AW + WB:  + dL/dW' B^T on the input dim
-                            p.grad += torch.einsum('ods,cd->ocs', G.reshape(C, p.shape[1], -1), B).reshape(p.shape)
+                        out = G if A is None else (torch.eye(C, device=p.device, dtype=p.dtype) + A).t() @ G
+                        if B is not None:
+                            out = out + torch.einsum('ods,cd->ocs', G.reshape(C, p.shape[1], -1), B).reshape(C, -1)
+                        p.grad = out.reshape(p.shape)
         bank = getattr(self, 'bank', None)
         if bank is not None:
             bank.perturbed = False
@@ -518,10 +523,10 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
     table = {'none': (), 'all': ('bn_scale', 'bn_bias', 'conv', 'linear', 'weight', 'bias'),
              'bn': ('bn_scale', 'bn_bias'),
              'bn_scale': ('bn_scale',), 'bn_bias': ('bn_bias',),
-             'conv': ('conv',), 'tangent': mats, 'orbit': mats, 'rot': mats, 'gl': mats, 'gl2': mats}
+             'conv': ('conv',), 'tangent': mats, 'orbit': mats, 'rot': mats, 'gl': mats, 'gl2': mats, 'glr': mats}
     arms = args.perturb.split('+')       # e.g. gl+bn_scale: matrix arm on W, plain/ASAM on gamma, one shared budget
     arm = tuple(n for a in arms for n in table[a])
-    proj = next((a for a in arms if a in ('tangent', 'orbit', 'rot', 'gl', 'gl2')), 'none')
+    proj = next((a for a in arms if a in ('tangent', 'orbit', 'rot', 'gl', 'gl2', 'glr')), 'none')
 
     groups = [dict(params=ps, name=n, rho=args.rho if n in arm else 0.0,
                    perturb=n in arm and args.rho > 0, scope='w', proj=proj if n in mats else 'none',
