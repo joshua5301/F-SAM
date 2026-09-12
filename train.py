@@ -122,6 +122,9 @@ parser.add_argument('--base', default='sgd', type=str, choices=['sgd', 'adamw'],
                     help='base optimizer for PGSAM')
 parser.add_argument('--warmup-epochs', dest='warmup_epochs', default=0, type=int,
                     help='linear LR warmup epochs before the cosine schedule (cosine only)')
+parser.add_argument('--aug', default='cutout', type=str, choices=['cutout', 'aa', 'aa+cutout'],
+                    help='CIFAR train augmentation on top of crop+flip (SAM-ON ViT recipe: aa)')
+parser.add_argument('--label-smoothing', dest='label_smoothing', default=0.0, type=float)
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')
@@ -296,7 +299,7 @@ def main():
     print (len(train_loader.dataset))
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing).cuda()
 
     if args.half:
         model.half()

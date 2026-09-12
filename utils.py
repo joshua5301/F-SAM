@@ -275,6 +275,9 @@ def get_datasets_cutout(args):
     vit = 'deit' in str(getattr(args, 'arch', ''))
     resize = [transforms.Resize(args.img_size)] if vit else []
     cutout = Cutout(16 * (args.img_size // 32)) if vit else Cutout()
+    aug = getattr(args, 'aug', 'cutout')                       # cutout | aa | aa+cutout
+    aa = [transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10)] if 'aa' in aug else []
+    cut = [cutout] if 'cutout' in aug else []
     if args.datasets == 'CIFAR10':
         print ('cifar10 dataset!')
         normalize = (transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)) if vit else
@@ -284,10 +287,11 @@ def get_datasets_cutout(args):
             datasets.CIFAR10(root='./datasets/', train=True, transform=transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, 4),
+                *aa,
                 *resize,
                 transforms.ToTensor(),
                 normalize,
-                cutout
+                *cut
             ]), download=True),
             batch_size=args.batch_size, shuffle=True,
             num_workers=args.workers, pin_memory=True)
@@ -315,10 +319,11 @@ def get_datasets_cutout(args):
             datasets.CIFAR100(root='./datasets/', train=True, transform=transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, 4),
+                *aa,
                 *resize,
                 transforms.ToTensor(),
                 normalize,
-                cutout
+                *cut
             ]), download=True),
             batch_size=args.batch_size, shuffle=True,
             num_workers=args.workers, pin_memory=True)
