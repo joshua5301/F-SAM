@@ -284,7 +284,7 @@ def get_datasets_cutout(args):
                      transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)))
 
         train_loader = torch.utils.data.DataLoader(
-            datasets.CIFAR10(root='./datasets/', train=True, transform=transforms.Compose([
+            datasets.CIFAR10(root='./data/', train=True, transform=transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, 4),
                 *aa,
@@ -297,7 +297,7 @@ def get_datasets_cutout(args):
             num_workers=args.workers, pin_memory=True)
 
         val_loader = torch.utils.data.DataLoader(
-            datasets.CIFAR10(root='./datasets/', train=False, transform=transforms.Compose([
+            datasets.CIFAR10(root='./data/', train=False, transform=transforms.Compose([
                 *resize,
                 transforms.ToTensor(),
                 normalize,
@@ -316,7 +316,7 @@ def get_datasets_cutout(args):
                      transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)))
 
         train_loader = torch.utils.data.DataLoader(
-            datasets.CIFAR100(root='./datasets/', train=True, transform=transforms.Compose([
+            datasets.CIFAR100(root='./data/', train=True, transform=transforms.Compose([
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomCrop(32, 4),
                 *aa,
@@ -329,7 +329,7 @@ def get_datasets_cutout(args):
             num_workers=args.workers, pin_memory=True)
 
         val_loader = torch.utils.data.DataLoader(
-            datasets.CIFAR100(root='./datasets/', train=False, transform=transforms.Compose([
+            datasets.CIFAR100(root='./data/', train=False, transform=transforms.Compose([
                 *resize,
                 transforms.ToTensor(),
                 normalize,
