@@ -349,7 +349,7 @@ class PGSAM(torch.optim.Optimizer):
     def __init__(self, param_groups, base_optimizer, **kwargs):
         super(PGSAM, self).__init__(param_groups, dict(
             rho=0.0, perturb=False, scope='w', is_gate=False,
-            adaptive=False, proj='none', envelope=False, ascent=True, **kwargs))
+            adaptive=False, proj='none', envelope=False, ascent=True, rot_exact=False, **kwargs))
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
@@ -401,7 +401,10 @@ class PGSAM(torch.optim.Optimizer):
                 if group.get('proj', 'none') == 'rot':
                     A = mats[p] * scale.to(p)                        # antisymmetric, ||A||_F = rho share
                     I = torch.eye(A.shape[0], device=p.device, dtype=p.dtype)
-                    Q = torch.linalg.solve(I - 0.5 * A, I + 0.5 * A)  # Cayley: Q in SO(C)
+                    if group.get('rot_exact', False):
+                        Q = torch.linalg.solve(I - 0.5 * A, I + 0.5 * A)   # exact Cayley (LU: host sync per layer)
+                    else:
+                        Q = I + A + 0.5 * (A @ A)                          # Cayley to 2nd order: Q^T Q = I + A^4/4
                     if group.get('envelope', False):
                         self.state[p]['Q'] = Q
                     if group.get('ascent', True):
@@ -510,6 +513,7 @@ def build_pgsam(model, args, base_optimizer=torch.optim.SGD, verbose=True):
                    perturb=n in arm and args.rho > 0, scope='w', proj=proj,
                    envelope=bool(getattr(args, 'envelope', False)),
                    ascent=not getattr(args, 'no_ascent', False),
+                   rot_exact=bool(getattr(args, 'rot_exact', False)),
                    is_gate=False, adaptive=bool(args.adaptive),
                    lr=args.lr, weight_decay=args.weight_decay)
               for n, ps in named if ps]

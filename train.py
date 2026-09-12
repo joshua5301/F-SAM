@@ -125,6 +125,9 @@ parser.add_argument('--warmup-epochs', dest='warmup_epochs', default=0, type=int
 parser.add_argument('--aug', default='cutout', type=str, choices=['cutout', 'aa', 'aa+cutout'],
                     help='CIFAR train augmentation on top of crop+flip (SAM-ON ViT recipe: aa)')
 parser.add_argument('--label-smoothing', dest='label_smoothing', default=0.0, type=float)
+parser.add_argument('--rot-exact', dest='rot_exact', action='store_true',
+                    help='rot: exact Cayley via linalg.solve (slow, one host sync per layer); '
+                         'default is the 2nd-order expansion I + A + A^2/2 (orthogonal to O(A^4))')
 parser.add_argument('--adaptive', action='store_true',
                     help='ASAM (= per-weight gate). Weight groups only: a no-op on gates, '
                          'whose value is already 1')
