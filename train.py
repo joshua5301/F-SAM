@@ -82,6 +82,8 @@ parser.add_argument('--sigma',  default=1, type=float,
                     metavar='S', help='sigma for FriendlySAM')
 parser.add_argument('--lmbda',  default=0.95, type=float,
                     metavar='L', help='lambda for FriendlySAM')
+parser.add_argument('--le-sigma', dest='le_sigma', default=0.0, type=float,
+                    help='PGSAM: loss budget sigma; --rho then acts as rho_max (rho_t = min(sigma/||d||, rho))')
 parser.add_argument('--le-warmup', dest='le_warmup', default=10, type=int,
                     help='LESAM: epochs of linear sigma warmup (0 -> sigma)')
 parser.add_argument('--le-decay', dest='le_decay', default=160, type=int,
@@ -358,8 +360,9 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
         for g, r in zip(optimizer.param_groups, rhos):
             g['rho'] = 0.0 if epoch < args.perturb_warmup else r
-            if args.optimizer == 'LESAM':
-                g['sigma'] = LESAM.sigma_at(epoch, args.epochs, args.sigma, args.le_warmup, args.le_decay)
+            if args.optimizer == 'LESAM' or args.le_sigma > 0:
+                s = args.sigma if args.optimizer == 'LESAM' else args.le_sigma
+                g['sigma'] = LESAM.sigma_at(epoch, args.epochs, s, args.le_warmup, args.le_decay)
 
         # train for one epoch
         print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))

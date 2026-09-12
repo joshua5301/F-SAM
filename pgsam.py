@@ -349,7 +349,7 @@ class PGSAM(torch.optim.Optimizer):
     def __init__(self, param_groups, base_optimizer, **kwargs):
         super(PGSAM, self).__init__(param_groups, dict(
             rho=0.0, perturb=False, scope='w', is_gate=False,
-            adaptive=False, proj='none', envelope=False, ascent=True, rot_exact=False, **kwargs))
+            adaptive=False, proj='none', envelope=False, ascent=True, rot_exact=False, sigma=0.0, **kwargs))
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
@@ -392,7 +392,10 @@ class PGSAM(torch.optim.Optimizer):
                     sq[group['scope']] = sq.get(group['scope'], 0.0) + n2
         for group in self._active():
             norm = sq.get(group['scope'])                      # scope None -> unnormalised
-            scale = torch.tensor(group['rho']) if norm is None else group['rho'] / (norm.sqrt() + 1e-12)
+            rho = group['rho']
+            if norm is not None and group.get('sigma', 0.0) > 0:   # loss-equated (LE-SAM): 1st-order rise = rho*||d||
+                rho = torch.clamp(group['sigma'] / (norm.sqrt() + 1e-12), max=rho)   # -> rho_t = min(sigma/||d||, rho_max)
+            scale = torch.tensor(rho) if norm is None else rho / (norm.sqrt() + 1e-12)
             for p in group['params']:
                 if p not in dirs:
                     continue
