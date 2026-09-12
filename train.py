@@ -82,6 +82,10 @@ parser.add_argument('--sigma',  default=1, type=float,
                     metavar='S', help='sigma for FriendlySAM')
 parser.add_argument('--lmbda',  default=0.95, type=float,
                     metavar='L', help='lambda for FriendlySAM')
+parser.add_argument('--le-warmup', dest='le_warmup', default=10, type=int,
+                    help='LESAM: epochs of linear sigma warmup (0 -> sigma)')
+parser.add_argument('--le-decay', dest='le_decay', default=160, type=int,
+                    help='LESAM: epoch at which sigma starts cosine decay to 0')
 
 
 
@@ -324,6 +328,9 @@ def main():
     elif args.optimizer == 'FriendlySAM_adamw':
         base_optimizer = torch.optim.AdamW
         optimizer = FriendlySAM(model.parameters(), base_optimizer, rho=args.rho, sigma=args.sigma, lmbda=args.lmbda, adaptive=0, lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer == 'LESAM':   # --sigma = loss budget, --rho = rho_max
+        optimizer = LESAM(model.parameters(), torch.optim.SGD, sigma=args.sigma, rho_max=args.rho,
+                          lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=False)
     elif args.optimizer == 'PGSAM':
         optimizer = build_pgsam(model, args, torch.optim.AdamW if args.base == 'adamw' else torch.optim.SGD)
 
@@ -351,6 +358,8 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
         for g, r in zip(optimizer.param_groups, rhos):
             g['rho'] = 0.0 if epoch < args.perturb_warmup else r
+            if args.optimizer == 'LESAM':
+                g['sigma'] = LESAM.sigma_at(epoch, args.epochs, args.sigma, args.le_warmup, args.le_decay)
 
         # train for one epoch
         print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))

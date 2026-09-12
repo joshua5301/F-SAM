@@ -3,6 +3,7 @@
 #   bash run_pgsam.sh --gates channel --gate-rho 0.05   # PG-SAM(ch)
 #   bash run_pgsam.sh --perturb bn --rho 0.5            # SAM-ON
 #   bash run_pgsam.sh --perturb all --rho 0.2           # SAM
+#   bash run_pgsam.sh --optimizer LESAM --sigma 0.35 --rho 0.4   # LE-SAM (rho = rho_max)
 device=0
 seed=1
 datasets=CIFAR100

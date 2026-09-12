@@ -439,6 +439,33 @@ class SAM(torch.optim.Optimizer):
         super().load_state_dict(state_dict)
         self.base_optimizer.param_groups = self.param_groups
 
+class LESAM(SAM):
+    """Loss-Equated SAM (ICML 2026): rho_t = min(sigma / ||g||, rho_max); sigma warms up
+    linearly over the first `warmup` epochs and cosine-decays to 0 from epoch `decay_start`."""
+    def __init__(self, params, base_optimizer, sigma=0.35, rho_max=0.4, **kwargs):
+        super().__init__(params, base_optimizer, rho=rho_max, adaptive=False, **kwargs)
+        for g in self.param_groups: g['sigma'] = sigma
+
+    @staticmethod
+    def sigma_at(epoch, epochs, sigma, warmup=10, decay_start=160):
+        if epoch < warmup: return sigma * epoch / max(1, warmup - 1)
+        if epoch < decay_start: return sigma
+        t = (epoch - decay_start) / max(1, epochs - decay_start - 1)
+        return 0.5 * sigma * (1 + math.cos(math.pi * min(1.0, t)))
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        grad_norm = self._grad_norm()
+        for group in self.param_groups:
+            rho_t = torch.clamp(group['sigma'] / (grad_norm + 1e-12), max=group['rho'])
+            scale = rho_t / (grad_norm + 1e-12)
+            for p in group['params']:
+                if p.grad is None: continue
+                self.state[p]['old_p'] = p.data.clone()
+                p.add_(p.grad * scale.to(p))
+        if zero_grad: self.zero_grad()
+
+
 class FriendlySAM(torch.optim.Optimizer):
     def __init__(self, params, base_optimizer, rho=0.05, sigma=1, lmbda=0.9, adaptive=False, **kwargs):
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
